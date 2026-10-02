@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use pumpkin_plugin_api::{
     Context, Plugin, PluginMetadata, Result, Server,
-    command::{Command, CommandNode},
+    command::{ArgumentType, Command, CommandNode, StringType},
     events::{
-        EventData, EventHandler, EventPriority, PlayerChatEvent, PlayerJoinEvent,
-        PlayerLeaveEvent, PlayerTeleportEvent,
+        EventData, EventHandler, EventPriority, PlayerChatEvent, PlayerJoinEvent, PlayerLeaveEvent,
+        PlayerTeleportEvent,
     },
     permission::{Permission, PermissionDefault, PermissionLevel},
     permissions::{FS_READ_DATA, FS_WRITE_DATA},
@@ -42,8 +42,7 @@ impl Plugin for EssentialsPlugin {
             name: "essentials-pumpkin".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["Port of EssentialsX concepts for Pumpkin".into()],
-            description: "Homes, warps, /back, TPA, messaging, economy and admin utilities."
-                .into(),
+            description: "Homes, warps, /back, TPA, messaging, economy and admin utilities.".into(),
             dependencies: vec![],
             permissions: vec![FS_READ_DATA.into(), FS_WRITE_DATA.into()],
         }
@@ -62,11 +61,27 @@ impl Plugin for EssentialsPlugin {
         register_commands(&context);
         tracing::info!("essentials-pumpkin commands registered");
 
-        context.register_event_handler::<PlayerJoinEvent, _>(JoinHandler, EventPriority::Normal, false)?;
-        context.register_event_handler::<PlayerLeaveEvent, _>(LeaveHandler, EventPriority::Normal, false)?;
-        context.register_event_handler::<PlayerTeleportEvent, _>(BackTracker, EventPriority::Lowest, false)?;
+        context.register_event_handler::<PlayerJoinEvent, _>(
+            JoinHandler,
+            EventPriority::Normal,
+            false,
+        )?;
+        context.register_event_handler::<PlayerLeaveEvent, _>(
+            LeaveHandler,
+            EventPriority::Normal,
+            false,
+        )?;
+        context.register_event_handler::<PlayerTeleportEvent, _>(
+            BackTracker,
+            EventPriority::Lowest,
+            false,
+        )?;
         // Blocking + high priority so a muted player's message can be cancelled.
-        context.register_event_handler::<PlayerChatEvent, _>(MuteFilter, EventPriority::High, true)?;
+        context.register_event_handler::<PlayerChatEvent, _>(
+            MuteFilter,
+            EventPriority::High,
+            true,
+        )?;
 
         tracing::info!("essentials-pumpkin loaded");
         Ok(())
@@ -142,7 +157,11 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
 /// Remembers where a player teleported *from*, for /back.
 struct BackTracker;
 impl EventHandler<PlayerTeleportEvent> for BackTracker {
-    fn handle(&self, _s: Server, ev: EventData<PlayerTeleportEvent>) -> EventData<PlayerTeleportEvent> {
+    fn handle(
+        &self,
+        _s: Server,
+        ev: EventData<PlayerTeleportEvent>,
+    ) -> EventData<PlayerTeleportEvent> {
         if !ev.cancelled {
             let (x, y, z) = ev.from_position;
             let loc = Loc {
@@ -203,234 +222,552 @@ fn reg(
     ctx.register_command(build(Command::new(&names, desc)), &node);
 }
 
+// Pumpkin's Wasm host does not implement ArgumentType::Message yet.
+fn greedy_text_node(name: &str) -> CommandNode {
+    CommandNode::argument(name, &ArgumentType::String(StringType::Greedy))
+}
+
 fn register_commands(ctx: &Context) {
     // ---- homes -----------------------------------------------------------
-    reg(ctx, "sethome", &["sethome", "esethome", "createhome", "ecreatehome"],
-        "Set a home at your location.", false, |c| {
-        c.execute(h(|s, _, _| homes::set_home(s, homes::default_home_name())))
-            .then(word_node("name").execute(h(|s, _, a| {
-                homes::set_home(s, &arg_str(a, "name").unwrap_or_default())
+    reg(
+        ctx,
+        "sethome",
+        &["sethome", "esethome", "createhome", "ecreatehome"],
+        "Set a home at your location.",
+        false,
+        |c| {
+            c.execute(h(|s, _, _| homes::set_home(s, homes::default_home_name())))
+                .then(word_node("name").execute(h(|s, _, a| {
+                    homes::set_home(s, &arg_str(a, "name").unwrap_or_default())
+                })))
+        },
+    );
+    reg(
+        ctx,
+        "home",
+        &["home", "ehome", "homes", "ehomes"],
+        "Teleport to a home.",
+        false,
+        |c| {
+            c.execute(h(|s, sv, _| homes::home_default(s, sv)))
+                .then(word_node("name").execute(h(|s, sv, a| {
+                    homes::go_home(s, sv, &arg_str(a, "name").unwrap_or_default())
+                })))
+        },
+    );
+    reg(
+        ctx,
+        "delhome",
+        &[
+            "delhome", "edelhome", "remhome", "eremhome", "rmhome", "ermhome",
+        ],
+        "Delete a home.",
+        false,
+        |c| {
+            c.then(word_node("name").execute(h(|s, _, a| {
+                homes::del_home(s, &arg_str(a, "name").unwrap_or_default())
             })))
-    });
-    reg(ctx, "home", &["home", "ehome", "homes", "ehomes"],
-        "Teleport to a home.", false, |c| {
-        c.execute(h(|s, sv, _| homes::home_default(s, sv)))
-            .then(word_node("name").execute(h(|s, sv, a| {
-                homes::go_home(s, sv, &arg_str(a, "name").unwrap_or_default())
-            })))
-    });
-    reg(ctx, "delhome", &["delhome", "edelhome", "remhome", "eremhome", "rmhome", "ermhome"],
-        "Delete a home.", false, |c| {
-        c.then(word_node("name").execute(h(|s, _, a| {
-            homes::del_home(s, &arg_str(a, "name").unwrap_or_default())
-        })))
-    });
+        },
+    );
 
     // ---- warps -----------------------------------------------------------
-    reg(ctx, "setwarp", &["setwarp", "esetwarp", "createwarp", "ecreatewarp"],
-        "Create a warp at your location.", true, |c| {
-        c.then(word_node("warp").execute(h(|s, _, a| {
-            homes::set_warp(s, &arg_str(a, "warp").unwrap_or_default())
-        })))
-    });
-    reg(ctx, "warp", &["warp", "ewarp", "warps", "ewarps"],
-        "Teleport to a warp, or list warps.", false, |c| {
-        c.execute(h(|s, _, _| homes::list_warps(s)))
-            .then(word_node("warp").execute(h(|s, sv, a| {
-                homes::go_warp(s, sv, &arg_str(a, "warp").unwrap_or_default())
+    reg(
+        ctx,
+        "setwarp",
+        &["setwarp", "esetwarp", "createwarp", "ecreatewarp"],
+        "Create a warp at your location.",
+        true,
+        |c| {
+            c.then(word_node("warp").execute(h(|s, _, a| {
+                homes::set_warp(s, &arg_str(a, "warp").unwrap_or_default())
             })))
-    });
-    reg(ctx, "delwarp", &["delwarp", "edelwarp", "remwarp", "eremwarp", "rmwarp", "ermwarp"],
-        "Delete a warp.", true, |c| {
-        c.then(word_node("warp").execute(h(|s, _, a| {
-            homes::del_warp(s, &arg_str(a, "warp").unwrap_or_default())
-        })))
-    });
+        },
+    );
+    reg(
+        ctx,
+        "warp",
+        &["warp", "ewarp", "warps", "ewarps"],
+        "Teleport to a warp, or list warps.",
+        false,
+        |c| {
+            c.execute(h(|s, _, _| homes::list_warps(s)))
+                .then(word_node("warp").execute(h(|s, sv, a| {
+                    homes::go_warp(s, sv, &arg_str(a, "warp").unwrap_or_default())
+                })))
+        },
+    );
+    reg(
+        ctx,
+        "delwarp",
+        &[
+            "delwarp", "edelwarp", "remwarp", "eremwarp", "rmwarp", "ermwarp",
+        ],
+        "Delete a warp.",
+        true,
+        |c| {
+            c.then(word_node("warp").execute(h(|s, _, a| {
+                homes::del_warp(s, &arg_str(a, "warp").unwrap_or_default())
+            })))
+        },
+    );
 
     // ---- teleportation ---------------------------------------------------
-    reg(ctx, "back", &["back", "eback", "return", "ereturn"],
-        "Return to your previous location.", false, |c| {
-        c.execute(h(|s, sv, _| teleport::back(s, sv)))
-    });
-    reg(ctx, "top", &["top", "etop"], "Teleport to the highest block above you.", false, |c| {
-        c.execute(h(|s, _, _| teleport::top(s)))
-    });
+    reg(
+        ctx,
+        "back",
+        &["back", "eback", "return", "ereturn"],
+        "Return to your previous location.",
+        false,
+        |c| c.execute(h(|s, sv, _| teleport::back(s, sv))),
+    );
+    reg(
+        ctx,
+        "top",
+        &["top", "etop"],
+        "Teleport to the highest block above you.",
+        false,
+        |c| c.execute(h(|s, _, _| teleport::top(s))),
+    );
     // Vanilla already owns /tp, so only Essentials' alternative names are registered.
-    reg(ctx, "tp", &["etp", "tele", "etele", "eteleport", "tp2p", "etp2p"],
-        "Teleport to a player (or one player to another).", true, |c| {
-        c.then(players_node("player")
-            .execute(h(|s, sv, a| teleport::tp(s, sv, a, false)))
-            .then(players_node("other").execute(h(|s, sv, a| teleport::tp(s, sv, a, true)))))
-    });
-    reg(ctx, "tphere", &["tphere", "etphere", "s"], "Teleport a player to you.", true, |c| {
-        c.then(players_node("player").execute(h(|s, sv, a| teleport::tphere(s, sv, a))))
-    });
-    reg(ctx, "tpall", &["tpall", "etpall"], "Teleport every player to you.", true, |c| {
-        c.execute(h(|s, sv, _| teleport::tpall(s, sv)))
-    });
-    reg(ctx, "tppos", &["tppos", "etppos"], "Teleport to coordinates.", true, |c| {
-        c.then(num_node("x").then(num_node("y").then(
-            num_node("z").execute(h(|s, _, a| teleport::tppos(s, a))),
-        )))
-    });
-    reg(ctx, "tpa", &["tpa", "etpa", "call", "ecall", "tpask", "etpask"],
-        "Ask to teleport to a player.", false, |c| {
-        c.then(players_node("player").execute(h(|s, _, a| teleport::tpa_request(s, a, false))))
-    });
-    reg(ctx, "tpahere", &["tpahere", "etpahere"],
-        "Ask a player to teleport to you.", false, |c| {
-        c.then(players_node("player").execute(h(|s, _, a| teleport::tpa_request(s, a, true))))
-    });
-    reg(ctx, "tpaccept", &["tpaccept", "etpaccept", "tpyes", "etpyes"],
-        "Accept a teleport request.", false, |c| {
-        c.execute(h(|s, sv, _| teleport::tpaccept(s, sv)))
-    });
-    reg(ctx, "tpdeny", &["tpdeny", "etpdeny", "tpno", "etpno"],
-        "Deny a teleport request.", false, |c| {
-        c.execute(h(|s, sv, _| teleport::tpdeny(s, sv)))
-    });
-    reg(ctx, "tpacancel", &["tpacancel", "etpacancel"],
-        "Cancel your outgoing teleport request.", false, |c| {
-        c.execute(h(|s, _, _| teleport::tpacancel(s)))
-    });
+    reg(
+        ctx,
+        "tp",
+        &["etp", "tele", "etele", "eteleport", "tp2p", "etp2p"],
+        "Teleport to a player (or one player to another).",
+        true,
+        |c| {
+            c.then(
+                players_node("player")
+                    .execute(h(|s, sv, a| teleport::tp(s, sv, a, false)))
+                    .then(
+                        players_node("other").execute(h(|s, sv, a| teleport::tp(s, sv, a, true))),
+                    ),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "tphere",
+        &["tphere", "etphere", "s"],
+        "Teleport a player to you.",
+        true,
+        |c| c.then(players_node("player").execute(h(|s, sv, a| teleport::tphere(s, sv, a)))),
+    );
+    reg(
+        ctx,
+        "tpall",
+        &["tpall", "etpall"],
+        "Teleport every player to you.",
+        true,
+        |c| c.execute(h(|s, sv, _| teleport::tpall(s, sv))),
+    );
+    reg(
+        ctx,
+        "tppos",
+        &["tppos", "etppos"],
+        "Teleport to coordinates.",
+        true,
+        |c| {
+            c.then(num_node("x").then(
+                num_node("y").then(num_node("z").execute(h(|s, _, a| teleport::tppos(s, a)))),
+            ))
+        },
+    );
+    reg(
+        ctx,
+        "tpa",
+        &["tpa", "etpa", "call", "ecall", "tpask", "etpask"],
+        "Ask to teleport to a player.",
+        false,
+        |c| c.then(players_node("player").execute(h(|s, _, a| teleport::tpa_request(s, a, false)))),
+    );
+    reg(
+        ctx,
+        "tpahere",
+        &["tpahere", "etpahere"],
+        "Ask a player to teleport to you.",
+        false,
+        |c| c.then(players_node("player").execute(h(|s, _, a| teleport::tpa_request(s, a, true)))),
+    );
+    reg(
+        ctx,
+        "tpaccept",
+        &["tpaccept", "etpaccept", "tpyes", "etpyes"],
+        "Accept a teleport request.",
+        false,
+        |c| c.execute(h(|s, sv, _| teleport::tpaccept(s, sv))),
+    );
+    reg(
+        ctx,
+        "tpdeny",
+        &["tpdeny", "etpdeny", "tpno", "etpno"],
+        "Deny a teleport request.",
+        false,
+        |c| c.execute(h(|s, sv, _| teleport::tpdeny(s, sv))),
+    );
+    reg(
+        ctx,
+        "tpacancel",
+        &["tpacancel", "etpacancel"],
+        "Cancel your outgoing teleport request.",
+        false,
+        |c| c.execute(h(|s, _, _| teleport::tpacancel(s))),
+    );
 
     // ---- chat & info -----------------------------------------------------
     // Vanilla owns /msg, /tell, /w and /me, so they are exposed under Essentials' other aliases.
-    reg(ctx, "emsg", &["m", "t", "pm", "epm", "etell", "whisper", "ewhisper"],
-        "Send a private message.", false, |c| {
-        c.then(players_node("target").then(msg_node("message").execute(h(|s, _, a| social::msg(s, a)))))
-    });
-    reg(ctx, "r", &["r", "er", "reply", "ereply"], "Reply to the last message.", false, |c| {
-        c.then(msg_node("message").execute(h(|s, sv, a| social::reply(s, sv, a))))
-    });
-    reg(ctx, "eme", &["action", "eaction", "describe", "edescribe"],
-        "Describe an action in chat.", false, |c| {
-        c.then(msg_node("action").execute(h(|s, sv, a| social::action(s, sv, a))))
-    });
-    reg(ctx, "broadcast", &["broadcast", "bc", "ebc", "bcast", "ebcast", "ebroadcast", "shout", "eshout"],
-        "Broadcast a message to everyone.", true, |c| {
-        c.then(msg_node("message").execute(h(|_, sv, a| social::announce(sv, a))))
-    });
-    reg(ctx, "nick", &["nick", "enick", "nickname", "enickname"],
-        "Change your (or another player's) nickname.", false, |c| {
-        c.then(word_node("nick").execute(h(|s, _, a| social::nick(s, a, None))))
-            .then(players_node("player").then(
-                word_node("nick").execute(h(|s, _, a| social::nick(s, a, Some("player")))),
-            ))
-    });
-    reg(ctx, "mute", &["mute", "emute", "silence", "esilence", "unmute", "eunmute"],
-        "Toggle a player's chat mute.", true, |c| {
-        c.then(players_node("player").execute(h(|s, _, a| social::mute(s, a))))
-    });
-    reg(ctx, "motd", &["motd", "emotd"], "Show the message of the day.", false, |c| {
-        c.execute(h(|s, _, _| social::motd(s)))
-    });
-    reg(ctx, "rules", &["rules", "erules"], "Show the server rules.", false, |c| {
-        c.execute(h(|s, _, _| social::rules(s)))
-    });
-    reg(ctx, "elist", &["online", "eonline", "playerlist", "eplayerlist", "plist", "eplist", "who", "ewho"],
-        "List online players.", false, |c| {
-        c.execute(h(|s, sv, _| social::list(s, sv)))
-    });
-    reg(ctx, "getpos", &["getpos", "egetpos", "coords", "ecoords", "whereami", "ewhereami", "getloc", "egetloc"],
-        "Show your (or another player's) coordinates.", false, |c| {
-        c.execute(h(|s, _, a| social::getpos(s, a, None)))
-            .then(players_node("player").execute(h(|s, _, a| social::getpos(s, a, Some("player")))))
-    });
-    reg(ctx, "ping", &["ping", "eping", "pong", "epong", "echo", "eecho"], "Show your latency.", false, |c| {
-        c.execute(h(|s, _, _| social::ping(s)))
-    });
-    reg(ctx, "near", &["near", "enear", "nearby", "enearby"], "List nearby players.", false, |c| {
-        c.execute(h(|s, sv, a| social::near(s, sv, a, false)))
-            .then(num_node("radius").execute(h(|s, sv, a| social::near(s, sv, a, true))))
-    });
-    reg(ctx, "seen", &["seen", "eseen"], "When was a player last online?", false, |c| {
-        c.then(word_node("name").execute(h(|s, sv, a| social::seen(s, sv, a))))
-    });
-    reg(ctx, "afk", &["afk", "eafk", "away", "eaway"], "Toggle your AFK status.", false, |c| {
-        c.execute(h(|s, sv, _| social::afk(s, sv)))
-    });
+    reg(
+        ctx,
+        "emsg",
+        &["m", "t", "pm", "epm", "etell", "whisper", "ewhisper"],
+        "Send a private message.",
+        false,
+        |c| {
+            c.then(
+                players_node("target")
+                    .then(greedy_text_node("message").execute(h(|s, _, a| social::msg(s, a)))),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "r",
+        &["r", "er", "reply", "ereply"],
+        "Reply to the last message.",
+        false,
+        |c| c.then(greedy_text_node("message").execute(h(|s, sv, a| social::reply(s, sv, a)))),
+    );
+    reg(
+        ctx,
+        "eme",
+        &["action", "eaction", "describe", "edescribe"],
+        "Describe an action in chat.",
+        false,
+        |c| c.then(greedy_text_node("action").execute(h(|s, sv, a| social::action(s, sv, a)))),
+    );
+    reg(
+        ctx,
+        "broadcast",
+        &[
+            "broadcast",
+            "bc",
+            "ebc",
+            "bcast",
+            "ebcast",
+            "ebroadcast",
+            "shout",
+            "eshout",
+        ],
+        "Broadcast a message to everyone.",
+        true,
+        |c| c.then(greedy_text_node("message").execute(h(|_, sv, a| social::announce(sv, a)))),
+    );
+    reg(
+        ctx,
+        "nick",
+        &["nick", "enick", "nickname", "enickname"],
+        "Change your (or another player's) nickname.",
+        false,
+        |c| {
+            c.then(word_node("nick").execute(h(|s, _, a| social::nick(s, a, None))))
+                .then(players_node("player").then(
+                    word_node("nick").execute(h(|s, _, a| social::nick(s, a, Some("player")))),
+                ))
+        },
+    );
+    reg(
+        ctx,
+        "mute",
+        &["mute", "emute", "silence", "esilence", "unmute", "eunmute"],
+        "Toggle a player's chat mute.",
+        true,
+        |c| c.then(players_node("player").execute(h(|s, _, a| social::mute(s, a)))),
+    );
+    reg(
+        ctx,
+        "motd",
+        &["motd", "emotd"],
+        "Show the message of the day.",
+        false,
+        |c| c.execute(h(|s, _, _| social::motd(s))),
+    );
+    reg(
+        ctx,
+        "rules",
+        &["rules", "erules"],
+        "Show the server rules.",
+        false,
+        |c| c.execute(h(|s, _, _| social::rules(s))),
+    );
+    reg(
+        ctx,
+        "elist",
+        &[
+            "online",
+            "eonline",
+            "playerlist",
+            "eplayerlist",
+            "plist",
+            "eplist",
+            "who",
+            "ewho",
+        ],
+        "List online players.",
+        false,
+        |c| c.execute(h(|s, sv, _| social::list(s, sv))),
+    );
+    reg(
+        ctx,
+        "getpos",
+        &[
+            "getpos",
+            "egetpos",
+            "coords",
+            "ecoords",
+            "whereami",
+            "ewhereami",
+            "getloc",
+            "egetloc",
+        ],
+        "Show your (or another player's) coordinates.",
+        false,
+        |c| {
+            c.execute(h(|s, _, a| social::getpos(s, a, None))).then(
+                players_node("player").execute(h(|s, _, a| social::getpos(s, a, Some("player")))),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "ping",
+        &["ping", "eping", "pong", "epong", "echo", "eecho"],
+        "Show your latency.",
+        false,
+        |c| c.execute(h(|s, _, _| social::ping(s))),
+    );
+    reg(
+        ctx,
+        "near",
+        &["near", "enear", "nearby", "enearby"],
+        "List nearby players.",
+        false,
+        |c| {
+            c.execute(h(|s, sv, a| social::near(s, sv, a, false)))
+                .then(num_node("radius").execute(h(|s, sv, a| social::near(s, sv, a, true))))
+        },
+    );
+    reg(
+        ctx,
+        "seen",
+        &["seen", "eseen"],
+        "When was a player last online?",
+        false,
+        |c| c.then(word_node("name").execute(h(|s, sv, a| social::seen(s, sv, a)))),
+    );
+    reg(
+        ctx,
+        "afk",
+        &["afk", "eafk", "away", "eaway"],
+        "Toggle your AFK status.",
+        false,
+        |c| c.execute(h(|s, sv, _| social::afk(s, sv))),
+    );
 
     // ---- player state ----------------------------------------------------
-    reg(ctx, "heal", &["heal", "eheal"], "Restore health and hunger.", true, |c| {
-        c.execute(h(|s, _, a| player::heal(s, a, None)))
-            .then(players_node("player").execute(h(|s, _, a| player::heal(s, a, Some("player")))))
-    });
-    reg(ctx, "feed", &["feed", "efeed", "eat", "eeat"], "Restore hunger.", true, |c| {
-        c.execute(h(|s, _, a| player::feed(s, a, None)))
-            .then(players_node("player").execute(h(|s, _, a| player::feed(s, a, Some("player")))))
-    });
+    reg(
+        ctx,
+        "heal",
+        &["heal", "eheal"],
+        "Restore health and hunger.",
+        true,
+        |c| {
+            c.execute(h(|s, _, a| player::heal(s, a, None))).then(
+                players_node("player").execute(h(|s, _, a| player::heal(s, a, Some("player")))),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "feed",
+        &["feed", "efeed", "eat", "eeat"],
+        "Restore hunger.",
+        true,
+        |c| {
+            c.execute(h(|s, _, a| player::feed(s, a, None))).then(
+                players_node("player").execute(h(|s, _, a| player::feed(s, a, Some("player")))),
+            )
+        },
+    );
     reg(ctx, "fly", &["fly", "efly"], "Toggle flight.", true, |c| {
         c.execute(h(|s, _, a| player::fly(s, a, None)))
             .then(players_node("player").execute(h(|s, _, a| player::fly(s, a, Some("player")))))
     });
-    reg(ctx, "god", &["god", "egod", "godmode", "egodmode", "tgm", "etgm"], "Toggle god mode.", true, |c| {
-        c.execute(h(|s, _, a| player::god(s, a, None)))
-            .then(players_node("player").execute(h(|s, _, a| player::god(s, a, Some("player")))))
-    });
-    reg(ctx, "speed", &["speed", "espeed", "flyspeed", "eflyspeed", "walkspeed", "ewalkspeed"],
-        "Change walking/flying speed (1-10).", true, |c| {
-        c.then(num_node("speed").execute(h(|s, _, a| player::speed(s, a, None))))
-            .then(CommandNode::literal("fly")
-                .then(num_node("speed").execute(h(|s, _, a| player::speed(s, a, Some(true))))))
-            .then(CommandNode::literal("walk")
-                .then(num_node("speed").execute(h(|s, _, a| player::speed(s, a, Some(false))))))
-    });
-    reg(ctx, "vanish", &["vanish", "v", "ev", "evanish"], "Hide yourself from other players.", true, |c| {
-        c.execute(h(|s, sv, _| player::vanish(s, sv)))
-    });
-    reg(ctx, "suicide", &["suicide", "esuicide"], "Take your own life.", false, |c| {
-        c.execute(h(|s, sv, _| player::suicide(s, sv)))
-    });
-    reg(ctx, "enderchest", &["enderchest", "eenderchest", "echest", "eechest", "ec", "eec"],
-        "Open your ender chest.", false, |c| {
-        c.execute(h(|s, _, _| player::enderchest(s)))
-    });
-    reg(ctx, "ptime", &["ptime", "eptime", "playertime", "eplayertime"],
-        "Set your personal time.", false, |c| {
-        c.then(word_node("time").execute(h(|s, _, a| player::ptime(s, a))))
-    });
-    reg(ctx, "pweather", &["pweather", "epweather", "playerweather", "eplayerweather"],
-        "Set your personal weather.", false, |c| {
-        c.then(word_node("weather").execute(h(|s, _, a| player::pweather(s, a))))
-    });
+    reg(
+        ctx,
+        "god",
+        &["god", "egod", "godmode", "egodmode", "tgm", "etgm"],
+        "Toggle god mode.",
+        true,
+        |c| {
+            c.execute(h(|s, _, a| player::god(s, a, None))).then(
+                players_node("player").execute(h(|s, _, a| player::god(s, a, Some("player")))),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "speed",
+        &[
+            "speed",
+            "espeed",
+            "flyspeed",
+            "eflyspeed",
+            "walkspeed",
+            "ewalkspeed",
+        ],
+        "Change walking/flying speed (1-10).",
+        true,
+        |c| {
+            c.then(num_node("speed").execute(h(|s, _, a| player::speed(s, a, None))))
+                .then(
+                    CommandNode::literal("fly").then(
+                        num_node("speed").execute(h(|s, _, a| player::speed(s, a, Some(true)))),
+                    ),
+                )
+                .then(
+                    CommandNode::literal("walk").then(
+                        num_node("speed").execute(h(|s, _, a| player::speed(s, a, Some(false)))),
+                    ),
+                )
+        },
+    );
+    reg(
+        ctx,
+        "vanish",
+        &["vanish", "v", "ev", "evanish"],
+        "Hide yourself from other players.",
+        true,
+        |c| c.execute(h(|s, sv, _| player::vanish(s, sv))),
+    );
+    reg(
+        ctx,
+        "suicide",
+        &["suicide", "esuicide"],
+        "Take your own life.",
+        false,
+        |c| c.execute(h(|s, sv, _| player::suicide(s, sv))),
+    );
+    reg(
+        ctx,
+        "enderchest",
+        &[
+            "enderchest",
+            "eenderchest",
+            "echest",
+            "eechest",
+            "ec",
+            "eec",
+        ],
+        "Open your ender chest.",
+        false,
+        |c| c.execute(h(|s, _, _| player::enderchest(s))),
+    );
+    reg(
+        ctx,
+        "ptime",
+        &["ptime", "eptime", "playertime", "eplayertime"],
+        "Set your personal time.",
+        false,
+        |c| c.then(word_node("time").execute(h(|s, _, a| player::ptime(s, a)))),
+    );
+    reg(
+        ctx,
+        "pweather",
+        &["pweather", "epweather", "playerweather", "eplayerweather"],
+        "Set your personal weather.",
+        false,
+        |c| c.then(word_node("weather").execute(h(|s, _, a| player::pweather(s, a)))),
+    );
 
     // ---- economy ---------------------------------------------------------
-    reg(ctx, "balance", &["balance", "bal", "ebal", "ebalance", "money", "emoney"],
-        "Show your (or another player's) balance.", false, |c| {
-        c.execute(h(|s, _, a| economy::balance(s, a, false)))
-            .then(word_node("name").execute(h(|s, _, a| economy::balance(s, a, true))))
-    });
-    reg(ctx, "pay", &["pay", "epay"], "Pay another player.", false, |c| {
-        c.then(players_node("player").then(num_node("amount").execute(h(|s, _, a| economy::pay(s, a)))))
-    });
-    reg(ctx, "balancetop", &["balancetop", "ebalancetop", "baltop", "ebaltop"],
-        "Show the richest players.", false, |c| {
-        c.execute(h(|s, _, _| economy::baltop(s)))
-    });
-    reg(ctx, "eco", &["eco", "eeco", "economy", "eeconomy"], "Manage player balances.", true, |c| {
-        let give = CommandNode::literal("give").then(players_node("player")
-            .then(num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Give)))));
-        let take = CommandNode::literal("take").then(players_node("player")
-            .then(num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Take)))));
-        let set = CommandNode::literal("set").then(players_node("player")
-            .then(num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Set)))));
-        let reset = CommandNode::literal("reset").then(
-            players_node("player").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Reset))));
-        c.then(give).then(take).then(set).then(reset)
-    });
+    reg(
+        ctx,
+        "balance",
+        &["balance", "bal", "ebal", "ebalance", "money", "emoney"],
+        "Show your (or another player's) balance.",
+        false,
+        |c| {
+            c.execute(h(|s, _, a| economy::balance(s, a, false)))
+                .then(word_node("name").execute(h(|s, _, a| economy::balance(s, a, true))))
+        },
+    );
+    reg(
+        ctx,
+        "pay",
+        &["pay", "epay"],
+        "Pay another player.",
+        false,
+        |c| {
+            c.then(
+                players_node("player")
+                    .then(num_node("amount").execute(h(|s, _, a| economy::pay(s, a)))),
+            )
+        },
+    );
+    reg(
+        ctx,
+        "balancetop",
+        &["balancetop", "ebalancetop", "baltop", "ebaltop"],
+        "Show the richest players.",
+        false,
+        |c| c.execute(h(|s, _, _| economy::baltop(s))),
+    );
+    reg(
+        ctx,
+        "eco",
+        &["eco", "eeco", "economy", "eeconomy"],
+        "Manage player balances.",
+        true,
+        |c| {
+            let give = CommandNode::literal("give")
+                .then(players_node("player").then(
+                    num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Give))),
+                ));
+            let take = CommandNode::literal("take")
+                .then(players_node("player").then(
+                    num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Take))),
+                ));
+            let set = CommandNode::literal("set").then(
+                players_node("player")
+                    .then(num_node("amount").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Set)))),
+            );
+            let reset = CommandNode::literal("reset").then(
+                players_node("player").execute(h(|s, _, a| economy::eco(s, a, EcoOp::Reset))),
+            );
+            c.then(give).then(take).then(set).then(reset)
+        },
+    );
 
     // ---- admin -----------------------------------------------------------
-    reg(ctx, "essentials", &["essentials", "eessentials", "ess", "eess", "essversion"],
-        "Plugin info and reload.", true, |c| {
-        c.execute(h(|s, _, _| {
-            say(s, &format!("essentials-pumpkin v{}", env!("CARGO_PKG_VERSION")));
-            ok()
-        }))
-        .then(CommandNode::literal("reload").execute(h(|s, _, _| {
-            with(|st| st.load());
-            say(s, "Configuration and data reloaded.");
-            ok()
-        })))
-    });
+    reg(
+        ctx,
+        "essentials",
+        &["essentials", "eessentials", "ess", "eess", "essversion"],
+        "Plugin info and reload.",
+        true,
+        |c| {
+            c.execute(h(|s, _, _| {
+                say(
+                    s,
+                    &format!("essentials-pumpkin v{}", env!("CARGO_PKG_VERSION")),
+                );
+                ok()
+            }))
+            .then(CommandNode::literal("reload").execute(h(|s, _, _| {
+                with(|st| st.load());
+                say(s, "Configuration and data reloaded.");
+                ok()
+            })))
+        },
+    );
 }

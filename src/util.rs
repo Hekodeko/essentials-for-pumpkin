@@ -51,9 +51,7 @@ pub fn players_node(name: &str) -> CommandNode {
 pub fn word_node(name: &str) -> CommandNode {
     CommandNode::argument(name, &ArgumentType::String(StringType::SingleWord))
 }
-pub fn msg_node(name: &str) -> CommandNode {
-    CommandNode::argument(name, &ArgumentType::Message)
-}
+
 pub fn num_node(name: &str) -> CommandNode {
     CommandNode::argument(name, &ArgumentType::Double((None, None)))
 }
@@ -135,9 +133,8 @@ pub fn me(sender: &CommandSender) -> Result<Player, CommandError> {
 
 /// A named player argument, or fail with "player not found".
 pub fn need_player(args: &ConsumedArgs, key: &str) -> Result<Player, CommandError> {
-    arg_player(args, key).ok_or_else(|| {
-        CommandError::CommandFailed(colored("Player not found.", NamedColor::Red))
-    })
+    arg_player(args, key)
+        .ok_or_else(|| CommandError::CommandFailed(colored("Player not found.", NamedColor::Red)))
 }
 
 /// Optional `[player]` argument: the named player, or the sender when `key` is `None`.
@@ -159,7 +156,10 @@ pub fn id_of(p: &Player) -> String {
 }
 
 pub fn dup(u: &Uuid) -> Uuid {
-    Uuid { high: u.high, low: u.low }
+    Uuid {
+        high: u.high,
+        low: u.low,
+    }
 }
 
 pub fn lookup(server: &Server, id: &str) -> Option<Player> {
